@@ -1,19 +1,28 @@
+# -*- coding: utf-8 -*-
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 import contextlib
 import numpy as np
 import pandas as pd
+import pytest
 import warnings
+
+import pytest
 
 from xarray import conventions, Variable, Dataset, open_dataset
 from xarray.core import utils, indexing
-from . import TestCase, requires_netCDF4, unittest
+from . import TestCase, requires_netCDF4, unittest, raises_regex, IndexerMaker
 from .test_backends import CFEncodedDataTest
 from xarray.core.pycompat import iteritems
 from xarray.backends.memory import InMemoryDataStore
 from xarray.backends.common import WritableCFDataStore
 from xarray.conventions import decode_cf
+
+
+B = IndexerMaker(indexing.BasicIndexer)
+O = IndexerMaker(indexing.OuterIndexer)
+V = IndexerMaker(indexing.VectorizedIndexer)
 
 
 class TestMaskedAndScaledArray(TestCase):
@@ -40,10 +49,10 @@ class TestMaskedAndScaledArray(TestCase):
     def test_0d(self):
         x = conventions.MaskedAndScaledArray(np.array(0), fill_value=0)
         self.assertTrue(np.isnan(x))
-        self.assertTrue(np.isnan(x[...]))
+        self.assertTrue(np.isnan(x[B[()]]))
 
         x = conventions.MaskedAndScaledArray(np.array(0), fill_value=10)
-        self.assertEqual(0, x[...])
+        self.assertEqual(0, x[B[()]])
 
     def test_multiple_fill_value(self):
         x = conventions.MaskedAndScaledArray(
@@ -53,59 +62,118 @@ class TestMaskedAndScaledArray(TestCase):
         x = conventions.MaskedAndScaledArray(
             np.array(0), fill_value=np.array([0, 1]))
         self.assertTrue(np.isnan(x))
-        self.assertTrue(np.isnan(x[...]))
+        self.assertTrue(np.isnan(x[B[()]]))
 
 
-class TestCharToStringArray(TestCase):
+class TestStackedBytesArray(TestCase):
     def test_wrapper_class(self):
-        array = np.array(list('abc'), dtype='S')
-        actual = conventions.CharToStringArray(array)
-        expected = np.array('abc', dtype='S')
-        self.assertEqual(actual.dtype, expected.dtype)
-        self.assertEqual(actual.shape, expected.shape)
-        self.assertEqual(actual.size, expected.size)
-        self.assertEqual(actual.ndim, expected.ndim)
-        with self.assertRaises(TypeError):
-            len(actual)
-        self.assertArrayEqual(expected, actual)
-        with self.assertRaises(IndexError):
-            actual[:2]
-        self.assertEqual(str(actual), 'abc')
-
-        array = np.array([list('abc'), list('cdf')], dtype='S')
-        actual = conventions.CharToStringArray(array)
-        expected = np.array(['abc', 'cdf'], dtype='S')
+        array = np.array([[b'a', b'b', b'c'], [b'd', b'e', b'f']], dtype='S')
+        actual = conventions.StackedBytesArray(array)
+        expected = np.array([b'abc', b'def'], dtype='S')
         self.assertEqual(actual.dtype, expected.dtype)
         self.assertEqual(actual.shape, expected.shape)
         self.assertEqual(actual.size, expected.size)
         self.assertEqual(actual.ndim, expected.ndim)
         self.assertEqual(len(actual), len(expected))
         self.assertArrayEqual(expected, actual)
-        self.assertArrayEqual(expected[:1], actual[:1])
-        with self.assertRaises(IndexError):
-            actual[:, :2]
+        self.assertArrayEqual(expected[:1], actual[B[:1]])
+        with pytest.raises(IndexError):
+            actual[B[:, :2]]
 
-    def test_char_to_string(self):
+    def test_scalar(self):
+        array = np.array([b'a', b'b', b'c'], dtype='S')
+        actual = conventions.StackedBytesArray(array)
+
+        expected = np.array(b'abc')
+        assert actual.dtype == expected.dtype
+        assert actual.shape == expected.shape
+        assert actual.size == expected.size
+        assert actual.ndim == expected.ndim
+        with pytest.raises(TypeError):
+            len(actual)
+        np.testing.assert_array_equal(expected, actual)
+        with pytest.raises(IndexError):
+            actual[B[:2]]
+        assert str(actual) == str(expected)
+
+    def test_char_to_bytes(self):
         array = np.array([['a', 'b', 'c'], ['d', 'e', 'f']])
         expected = np.array(['abc', 'def'])
-        actual = conventions.char_to_string(array)
+        actual = conventions.char_to_bytes(array)
         self.assertArrayEqual(actual, expected)
 
         expected = np.array(['ad', 'be', 'cf'])
-        actual = conventions.char_to_string(array.T)  # non-contiguous
+        actual = conventions.char_to_bytes(array.T)  # non-contiguous
         self.assertArrayEqual(actual, expected)
 
-    def test_string_to_char(self):
+    def test_char_to_bytes_ndim_zero(self):
+        expected = np.array('a')
+        actual = conventions.char_to_bytes(expected)
+        self.assertArrayEqual(actual, expected)
+
+    def test_char_to_bytes_size_zero(self):
+        array = np.zeros((3, 0), dtype='S1')
+        expected = np.array([b'', b'', b''])
+        actual = conventions.char_to_bytes(array)
+        self.assertArrayEqual(actual, expected)
+
+    def test_bytes_to_char(self):
         array = np.array([['ab', 'cd'], ['ef', 'gh']])
         expected = np.array([[['a', 'b'], ['c', 'd']],
                              [['e', 'f'], ['g', 'h']]])
-        actual = conventions.string_to_char(array)
+        actual = conventions.bytes_to_char(array)
         self.assertArrayEqual(actual, expected)
 
         expected = np.array([[['a', 'b'], ['e', 'f']],
                              [['c', 'd'], ['g', 'h']]])
-        actual = conventions.string_to_char(array.T)
+        actual = conventions.bytes_to_char(array.T)
         self.assertArrayEqual(actual, expected)
+
+    def test_vectorized_indexing(self):
+        array = np.array([[b'a', b'b', b'c'], [b'd', b'e', b'f']], dtype='S')
+        stacked = conventions.StackedBytesArray(array)
+        expected = np.array([[b'abc', b'def'], [b'def', b'abc']])
+        indexer = V[np.array([[0, 1], [1, 0]])]
+        actual = stacked[indexer]
+        self.assertArrayEqual(actual, expected)
+
+
+class TestBytesToStringArray(TestCase):
+
+    def test_encoding(self):
+        encoding = 'utf-8'
+        raw_array = np.array([b'abc', u'ß∂µ∆'.encode(encoding)])
+        actual = conventions.BytesToStringArray(raw_array, encoding=encoding)
+        expected = np.array([u'abc', u'ß∂µ∆'], dtype=object)
+
+        self.assertEqual(actual.dtype, expected.dtype)
+        self.assertEqual(actual.shape, expected.shape)
+        self.assertEqual(actual.size, expected.size)
+        self.assertEqual(actual.ndim, expected.ndim)
+        self.assertArrayEqual(expected, actual)
+        self.assertArrayEqual(expected[0], actual[B[0]])
+
+    def test_scalar(self):
+        expected = np.array(u'abc', dtype=object)
+        actual = conventions.BytesToStringArray(
+            np.array(b'abc'), encoding='utf-8')
+        assert actual.dtype == expected.dtype
+        assert actual.shape == expected.shape
+        assert actual.size == expected.size
+        assert actual.ndim == expected.ndim
+        with pytest.raises(TypeError):
+            len(actual)
+        np.testing.assert_array_equal(expected, actual)
+        with pytest.raises(IndexError):
+            actual[B[:2]]
+        assert str(actual) == str(expected)
+
+    def test_decode_bytes_array(self):
+        encoding = 'utf-8'
+        raw_array = np.array([b'abc', u'ß∂µ∆'.encode(encoding)])
+        expected = np.array([u'abc', u'ß∂µ∆'], dtype=object)
+        actual = conventions.decode_bytes_array(raw_array, encoding)
+        np.testing.assert_array_equal(actual, expected)
 
 
 class TestUnsignedIntTypeArray(TestCase):
@@ -219,7 +287,7 @@ class TestDatetime(TestCase):
     def test_decode_cf_datetime_transition_to_invalid(self):
         # manually create dataset with not-decoded date
         from datetime import datetime
-        ds = Dataset(coords={'time' : [0, 266 * 365]})
+        ds = Dataset(coords={'time': [0, 266 * 365]})
         units = 'days since 2000-01-01 00:00:00'
         ds.time.attrs = dict(units=units)
         ds_decoded = conventions.decode_cf(ds)
@@ -247,13 +315,13 @@ class TestDatetime(TestCase):
             np.array([0, 1, 2]), 'days since 1900-01-01', 'standard')
         expected = pd.date_range('1900-01-01', periods=3).values
         self.assertEqual(actual.dtype, np.dtype('datetime64[ns]'))
-        self.assertArrayEqual(actual[slice(0, 2)], expected[slice(0, 2)])
+        self.assertArrayEqual(actual[B[0:2]], expected[slice(0, 2)])
 
         actual = conventions.DecodedCFDatetimeArray(
             np.array([0, 1, 2]), 'days since 1900-01-01', 'standard')
         expected = pd.date_range('1900-01-01', periods=3).values
         self.assertEqual(actual.dtype, np.dtype('datetime64[ns]'))
-        self.assertArrayEqual(actual[[0, 2]], expected[[0, 2]])
+        self.assertArrayEqual(actual[O[np.array([0, 2])]], expected[[0, 2]])
 
     def test_decode_cf_datetime_non_standard_units(self):
         expected = pd.date_range(periods=100, start='1970-01-01', freq='h')
@@ -268,21 +336,21 @@ class TestDatetime(TestCase):
                        {'units': 'foobar',
                         'missing_value': 0,
                         '_FillValue': 1})
-        self.assertRaisesRegexp(ValueError, "_FillValue and missing_value",
-                                lambda: conventions.decode_cf_variable(var))
+        with raises_regex(ValueError, "_FillValue and missing_value"):
+            conventions.decode_cf_variable('t', var)
 
         var = Variable(['t'], np.arange(10),
                        {'units': 'foobar',
                         'missing_value': np.nan,
                         '_FillValue': np.nan})
-        var = conventions.decode_cf_variable(var)
+        var = conventions.decode_cf_variable('t', var)
         self.assertIsNotNone(var)
 
         var = Variable(['t'], np.arange(10),
-                               {'units': 'foobar',
-                                'missing_value': np.float32(np.nan),
-                                '_FillValue': np.float32(np.nan)})
-        var = conventions.decode_cf_variable(var)
+                       {'units': 'foobar',
+                        'missing_value': np.float32(np.nan),
+                        '_FillValue': np.float32(np.nan)})
+        var = conventions.decode_cf_variable('t', var)
         self.assertIsNotNone(var)
 
     @requires_netCDF4
@@ -494,7 +562,7 @@ class TestDatetime(TestCase):
 
     def test_invalid_units_raises_eagerly(self):
         ds = Dataset({'time': ('time', [0, 1], {'units': 'foobar since 123'})})
-        with self.assertRaisesRegexp(ValueError, 'unable to decode time'):
+        with raises_regex(ValueError, 'unable to decode time'):
             decode_cf(ds)
 
     @requires_netCDF4
@@ -538,7 +606,7 @@ class TestEncodeCFVariable(TestCase):
             Variable(['t'], [0, 1, 2], {'_FillValue': 0}, {'_FillValue': 2}),
             ]
         for var in invalid_vars:
-            with self.assertRaises(ValueError):
+            with pytest.raises(ValueError):
                 conventions.encode_cf_variable(var)
 
     def test_missing_fillvalue(self):
@@ -578,7 +646,7 @@ class TestDecodeCF(TestCase):
     def test_0d_int32_encoding(self):
         original = Variable((), np.int32(0), encoding={'dtype': 'int64'})
         expected = Variable((), np.int64(0))
-        actual = conventions.maybe_encode_dtype(original)
+        actual = conventions.maybe_encode_nonstring_dtype(original)
         self.assertDatasetIdentical(expected, actual)
 
     def test_decode_cf_with_multiple_missing_values(self):
@@ -586,9 +654,9 @@ class TestDecodeCF(TestCase):
                             {'missing_value': np.array([0, 1])})
         expected = Variable(['t'], [np.nan, np.nan, 2], {})
         with warnings.catch_warnings(record=True) as w:
-            actual = conventions.decode_cf_variable(original)
+            actual = conventions.decode_cf_variable('t', original)
             self.assertDatasetIdentical(expected, actual)
-            self.assertIn('variable has multiple fill', str(w[0].message))
+            self.assertIn('has multiple fill', str(w[0].message))
 
     def test_decode_cf_with_drop_variables(self):
         original = Dataset({

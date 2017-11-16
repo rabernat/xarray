@@ -12,7 +12,7 @@ if PY3:  # pragma: no cover
     basestring = str
     unicode_type = str
     bytes_type = bytes
-    integer_types = (int, np.integer)
+    native_int_types = (int,)
 
     def iteritems(d):
         return iter(d.items())
@@ -25,12 +25,13 @@ if PY3:  # pragma: no cover
     from functools import reduce
     import builtins
     from urllib.request import urlretrieve
+    from inspect import getfullargspec as getargspec
 else:  # pragma: no cover
     # Python 2
     basestring = basestring  # noqa
     unicode_type = unicode  # noqa
     bytes_type = str
-    integer_types = (int, long, np.integer)  # noqa
+    native_int_types = (int, long)  # noqa
 
     def iteritems(d):
         return d.iteritems()
@@ -43,6 +44,9 @@ else:  # pragma: no cover
     reduce = reduce
     import __builtin__ as builtins
     from urllib import urlretrieve
+    from inspect import getargspec
+
+integer_types = native_int_types + (np.integer,)
 
 try:
     from cyordereddict import OrderedDict
