@@ -2,17 +2,17 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 import functools
-import warnings
 from itertools import product
-from collections import MutableMapping
+
+import numpy as np
 
 from .. import Variable
 from ..core import indexing
-from ..core.utils import FrozenOrderedDict, close_on_error, HiddenKeyDict
-from ..core.pycompat import iteritems, bytes_type, unicode_type, OrderedDict
+from ..core.utils import FrozenOrderedDict, HiddenKeyDict
+from ..core.pycompat import iteritems
+from ..core.indexing import BasicIndexer, OuterIndexer, VectorizedIndexer
 
-from .common import (WritableCFDataStore, AbstractWritableDataStore,
-                     DataStorePickleMixin)
+from .common import WritableCFDataStore, DataStorePickleMixin, BackendArray
 
 from .. import conventions
 
@@ -34,10 +34,58 @@ from .. import conventions
 # store=None, overwrite=False, chunk_store=None, synchronizer=None, path=None
 # the group name is called "path" in the zarr lexicon
 
+# from @shoyer
+# untested, but I think this does the appropriate shape munging to make slices
+# appear as the last axes of the result array
+def _replace_slice_with_arrays(key, shape):
+    num_slices = sum(1 for k in key if isinstance(k, slice))
+    num_arrays = len(shape) - num_slices
+    new_key = []
+    slice_count = 0
+    for k, size in zip(key, shape):
+        if isinstance(k, slice):
+            array = np.arange(*k.indices(size))
+            sl = [np.newaxis] * len(shape)
+            sl[num_arrays + slice_count] = np.newaxis
+            k = array[sl]
+            slice_count += 1
+        else:
+            assert isinstance(k, np.ndarray)
+            k = k[(slice(None),) * num_arrays + (np.newaxis,) * num_slices]
+        new_key.append(k)
+    return tuple(new_key)
+
+
+class ZarrArrayWraper(BackendArray):
+    def __init__(self, variable_name, datastore):
+        self.datastore = datastore
+        self.variable_name = variable_name
+        array = self.get_array()
+        self.shape = array.shape
+        self.dtype = np.dtype(array.dtype.kind +
+                              str(array.dtype.itemsize))
+
+    def get_array(self):
+        self.datastore.assert_open()
+        return self.datastore.ds[self.variable_name]  # returns a zarr-array
+
+    def __getitem__(self, key):
+        array = self.get_array()
+        if isinstance(key, BasicIndexer):
+            return array[key.tuple]
+        elif isinstance(key, VectorizedIndexer):
+            return array.vindex[_replace_slice_with_arrays(key.tuple,
+                                                           self.shape)]
+        else:
+            assert isinstance(key, OuterIndexer)
+            return array.oindex[key.tuple]
+
+
 def _open_zarr_group(store, overwrite, chunk_store, synchronizer, path):
     import zarr
     zarr_group = zarr.group(store=store, overwrite=overwrite,
-            chunk_store=chunk_store, synchronizer=synchronizer, path=path)
+                            chunk_store=chunk_store, synchronizer=synchronizer,
+                            path=path)
     return zarr_group
 
 
@@ -94,13 +142,13 @@ class ZarrStore(WritableCFDataStore, DataStorePickleMixin):
         # do we need to define attributes for all of the opener keyword args?
         super(ZarrStore, self).__init__(writer)
 
-    def open_store_variable(self, name, zarr_array):
+    def open_store_variable(self, name, var):
         # I don't see why it is necessary to wrap self.ds[name]
         # zarr seems to implement the required ndarray interface
         # TODO: possibly wrap zarr array in dask with aligned chunks
-        data = indexing.LazilyIndexedArray(zarr_array)
+        data = indexing.LazilyIndexedArray(ZarrArrayWraper(name, self))
         dimensions, attributes = _get_zarr_dims_and_attrs(
-                                    zarr_array, self._dimension_key)
+                                    var, self._dimension_key)
         return Variable(dimensions, data, attributes)
 
     def get_variables(self):
@@ -121,14 +169,17 @@ class ZarrStore(WritableCFDataStore, DataStorePickleMixin):
                                                      self._dimension_key)
             return dimensions
 
-    def set_dimension(self, name, length):
+    def set_dimension(self, name, length, is_unlimited=False):
+        if is_unlimited:
+            raise NotImplementedError(
+                'Zarr backend does not yet support unlimited dimensions')
         with self.ensure_open(autoclose=False):
             self.ds.attrs[self._dimension_key][name] = length
 
     def set_attribute(self, key, value):
         with self.ensure_open(autoclose=False):
             _, attributes = _get_zarr_dims_and_attrs(self.ds,
-                                self._dimension_key)
+                                                     self._dimension_key)
             attributes[key] = value
 
     def prepare_variable(self, name, variable, check_encoding=False,
@@ -140,7 +191,9 @@ class ZarrStore(WritableCFDataStore, DataStorePickleMixin):
         shape = variable.shape
         chunks = _dask_chunks_to_zarr_chunks(variable.chunks)
 
-        # TODO: figure ouw how zarr should deal with unlimited dimensions
+        if unlimited_dims is not None:
+            raise NotImplementedError(
+                'Zarr backend does not yet support unlimited dimensions')
         self.set_necessary_dimensions(variable, unlimited_dims=unlimited_dims)
 
         # let's try keeping this fill value stuff
@@ -150,7 +203,7 @@ class ZarrStore(WritableCFDataStore, DataStorePickleMixin):
 
         # TODO: figure out what encoding is needed for zarr
 
-        ### arguments for zarr.create
+        # ## arguments for zarr.create
         # zarr.creation.create(shape, chunks=None, dtype=None, compressor='default',
         # fill_value=0, order='C', store=None, synchronizer=None, overwrite=False,
         # path=None, chunk_store=None, filters=None, cache_metadata=True, **kwargs)
@@ -172,9 +225,9 @@ class ZarrStore(WritableCFDataStore, DataStorePickleMixin):
 
 
 def open_zarr(store, decode_cf=True,
-                 mask_and_scale=True, decode_times=True, autoclose=False,
-                 concat_characters=True, decode_coords=True,
-                 cache=None, drop_variables=None):
+              mask_and_scale=True, decode_times=True, autoclose=False,
+              concat_characters=True, decode_coords=True,
+              cache=None, drop_variables=None):
     """Load and decode a dataset from a file or file-like object.
 
     Parameters
@@ -242,7 +295,7 @@ def open_zarr(store, decode_cf=True,
 
         # this is how we would apply caching
         # but do we want it for zarr stores?
-        #_protect_dataset_variables_inplace(ds, cache)
+        # _protect_dataset_variables_inplace(ds, cache)
 
         return ds
 
