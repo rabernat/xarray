@@ -1126,11 +1126,6 @@ class BaseZarrTest(CFEncodedDataTest):
     def test_vectorized_indexing(self):
         self._test_vectorized_indexing(vindex_support=True)
 
-    def test_append_write(self):
-        data = create_test_data()
-        with self.roundtrip_append(data) as actual:
-            self.assertDatasetIdentical(data, actual)
-
 
 @requires_zarr
 class ZarrDictStoreTest(BaseZarrTest, TestCase):
