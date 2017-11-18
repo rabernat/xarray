@@ -235,7 +235,12 @@ class AbstractWritableDataStore(AbstractDataStore):
                 target, source = self.prepare_variable(
                     name, v, check, unlimited_dims=unlimited_dims)
             else:
-                target, source = self.ds.variables[name], v.data
+                try:
+                    target, source = self.ds.variables[name], v.data
+                except AttributeError:
+                    # This is because zarr datasets dont have a variables
+                    # attribute - there is likely a more elegant solution here.
+                    target, source = self.ds[name], v.data
 
             self.writer.add(source, target)
 

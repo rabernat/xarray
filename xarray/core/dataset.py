@@ -1131,7 +1131,7 @@ class Dataset(Mapping, ImplementsDatasetReduce, BaseDataObject,
                          engine=engine, encoding=encoding,
                          unlimited_dims=unlimited_dims)
 
-    def to_zarr(self, store=None, mode='a', synchronizer=None, group=None,
+    def to_zarr(self, store=None, mode='w', synchronizer=None, group=None,
                 encoding=None):
         """Write dataset contents to a zarr group.
 
@@ -1157,7 +1157,7 @@ class Dataset(Mapping, ImplementsDatasetReduce, BaseDataObject,
             encoding = {}
         from ..backends.api import to_zarr
         return to_zarr(self, store=store, mode=mode, synchronizer=synchronizer,
-                         group=group, encoding=encoding)
+                       group=group, encoding=encoding)
 
     def __unicode__(self):
         return formatting.dataset_repr(self)

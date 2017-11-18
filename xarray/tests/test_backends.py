@@ -167,7 +167,6 @@ class DatasetIOTestCases(object):
                           **kwargs) as ds:
             yield ds
 
-    # note: zero dimensional arrays are not suppoerted by zarr backend
     def test_zero_dimensional_variable(self):
         expected = create_test_data()
         expected['float_var'] = ([], 1.0e9, {'units': 'units of awesome'})
@@ -1085,6 +1084,15 @@ class NetCDF4ViaDaskDataTestAutocloseTrue(NetCDF4ViaDaskDataTest):
 
 @requires_zarr
 class BaseZarrTest(CFEncodedDataTest):
+
+    def save(self, dataset, store, **kwargs):
+        dataset.to_zarr(store=store, **kwargs)
+
+    @contextlib.contextmanager
+    def open(self, store, **kwargs):
+        with xr.open_zarr(store, **kwargs) as ds:
+            yield ds
+
     def test_auto_chunk(self):
         original = create_test_data().chunk()
 
@@ -1118,9 +1126,15 @@ class BaseZarrTest(CFEncodedDataTest):
     def test_vectorized_indexing(self):
         self._test_vectorized_indexing(vindex_support=True)
 
+    def test_append_write(self):
+        data = create_test_data()
+        with self.roundtrip_append(data) as actual:
+            self.assertDatasetIdentical(data, actual)
+
 
 @requires_zarr
 class ZarrDictStoreTest(BaseZarrTest, TestCase):
+
     @contextlib.contextmanager
     def create_store(self):
         yield backends.ZarrStore(store={})
@@ -1128,9 +1142,10 @@ class ZarrDictStoreTest(BaseZarrTest, TestCase):
     @contextlib.contextmanager
     def roundtrip(self, data, save_kwargs={}, open_kwargs={},
                   allow_cleanup_failure=False):
-        dict_store = {}
-        data.to_zarr(store=dict_store, **save_kwargs)
-        yield xr.open_zarr(dict_store, **open_kwargs)
+        store = {}
+        self.save(data, store=store, **save_kwargs)
+        with self.open(store, **open_kwargs) as ds:
+            yield ds
 
 
 @requires_zarr
@@ -1146,8 +1161,9 @@ class ZarrDirectoryStoreTest(BaseZarrTest, TestCase):
         with create_tmp_file(
                 suffix='.zarr',
                 allow_cleanup_failure=allow_cleanup_failure) as tmp_file:
-            data.to_zarr(store=tmp_file, **save_kwargs)
-            yield xr.open_zarr(tmp_file, **open_kwargs)
+            self.save(data, store=tmp_file, **save_kwargs)
+            with self.open(tmp_file, **open_kwargs) as ds:
+                yield ds
 
 
 @requires_scipy
